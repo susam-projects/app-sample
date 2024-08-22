@@ -1,0 +1,8 @@
+{
+  "*.(js{x,}|ts{x,})": [
+    "eslint --fix --ext .js,.ts,.jsx,.tsx --config .eslintrc.cjs"
+  ],
+  "{*.,}style{d,s,}.ts{x,}": [
+    "stylelint --fix --config .stylelintrc.json"
+  ],
+}

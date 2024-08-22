@@ -1,0 +1,122 @@
+image: node:20.9.0
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      variables: 
+        ENV: "prod"
+        TAG: "front"
+    - if: $CI_COMMIT_BRANCH == "develop"
+      variables: 
+        ENV: "dev"
+        TAG: "front"
+    - if: $CI_COMMIT_BRANCH
+    -   if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+
+stages:
+  - init
+  - lint
+  - build
+  - deploy
+
+.npm_cache: &npm_cache
+  key:
+    files:
+      - ./package-lock.json
+  paths:
+    - ./node_modules
+  policy: pull-push
+
+.build_cache: &build_cache
+  key: $CI_COMMIT_REF_SLUG
+  paths:
+    - ./dist
+  policy: pull-push
+
+install:
+  stage: init
+  script:
+    - npm ci
+  cache:
+    - <<: *npm_cache  
+  only:
+    - develop
+    - main
+  tags:
+    - docker-s3-cache
+
+lint:
+  stage: lint
+  script:
+    - npm run lint
+  only:
+    - develop
+    - main
+  cache:
+    - <<: *npm_cache 
+      policy: pull
+  tags:
+    - docker-s3-cache
+
+build_app:
+  stage: build
+  script:
+    - npm run build
+  only:
+    - develop
+    - main
+  cache:
+    - <<: *npm_cache  
+      policy: pull
+    - <<: *build_cache
+  tags:
+    - docker-s3-cache
+
+build_image:
+  stage: build
+  image: docker:24
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker compose -f docker-compose.build.yml build
+    - docker compose -f docker-compose.build.yml push
+  needs:
+    - build_app
+  tags:
+    - docker-s3-cache
+  only:
+    - main
+    - develop
+  cache:
+    - <<: *npm_cache
+      policy: pull
+    - <<: *build_cache
+      policy: pull
+
+deploy:
+  tags:
+    - docker
+  stage: deploy
+  image: debian:bullseye-slim
+  before_script:
+    - which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )
+    - eval $(ssh-agent -s)
+    - chmod 400 "$SSH_PRIVATE_KEY"
+    - ssh-add "$SSH_PRIVATE_KEY"
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - touch ~/.ssh/known_hosts
+    - ssh-keyscan -H ${SERVER} >> /root/.ssh/known_hosts
+  script:
+    - sed -i "s|\${CI_REGISTRY_IMAGE}|${CI_REGISTRY_IMAGE}|g" docker-compose.$ENV.yml
+    - sed -i "s|\${CI_COMMIT_SHORT_SHA}|${CI_COMMIT_SHORT_SHA}|g" docker-compose.$ENV.yml
+    - scp docker-compose.$ENV.yml root@${SERVER}:/root/
+    - ssh root@${SERVER} docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - ssh root@${SERVER} docker compose -f docker-compose.$ENV.yml pull
+    - ssh root@${SERVER} docker compose -f docker-compose.$ENV.yml -p $ENV up -d
+    - ssh root@${SERVER} docker ps
+  only:
+    - main
+    - develop
+  environment:
+    name: $ENV
